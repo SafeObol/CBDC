@@ -1,0 +1,406 @@
+pragma solidity ^0.8.4;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/IGovernorUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/GovernorUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorCountingSimpleUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorVotesUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorVotesQuorumFractionUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorVotesCompUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorTimelockControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorSettingsUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorPreventLateQuorumUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/compatibility/GovernorCompatibilityBravoUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorProposalThresholdUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/governance/TimelockControllerUpgradeable.sol";
+import "./SafeObolIntermediaryBank.sol";
+
+contract SafeObolCentralBank is Initializable, ERC20Upgradeable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+    using SafeMathUpgradeable for uint256;
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
+    // Token details
+    uint256 public constant totalSupply = 6e9 * (10**uint256(decimals())); // 6 billion tokens
+    uint8 public constant decimals = 18;
+    uint256 public tokenPrice;
+
+    // Transaction fees
+    uint256 public transactionFee;
+    uint256 public dividendFee;
+    uint256 public airdropFee;
+
+    // Interest rates
+    uint256 public lendingInterestRate;
+    uint256 public borrowingInterestRate;
+
+    // Event for changing transaction fees
+    event TransactionFeesUpdated(uint256 transactionFee, uint256 dividendFee, uint256 airdropFee);
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() initializer {}
+
+    function initialize() initializer public {
+        __ERC20_init("SafeObol", "SOB");
+        __UUPSUpgradeable_init();
+        __Ownable_init();
+        __ReentrancyGuard_init();
+        __Pausable_init();
+
+        transactionFee = 0; // Set default transaction fee to 0
+        dividendFee = 0; // Set default dividend fee to 0
+        airdropFee = 0; // Set default airdrop fee to 0
+
+        lendingInterestRate = 0; // Set default lending interest rate to 0
+        borrowingInterestRate = 0; // Set default borrowing interest rate to 0
+
+        tokenPrice = 1e18; // Set default token price to 1 ETH
+    }
+
+    // Update transaction fees
+    function updateTransactionFees(uint256 _transactionFee, uint256 _dividendFee, uint256 _airdropFee) external onlyOwner {
+        transactionFee = _transactionFee;
+        dividendFee = _dividendFee;
+        airdropFee = _airdropFee;
+        emit TransactionFeesUpdated(_transactionFee, _dividendFee, _airdropFee);
+    }
+
+    // Update interest rates
+    function updateInterestRates(uint256 _lendingInterestRate, uint256 _borrowingInterestRate) external onlyOwner {
+        lendingInterestRate = _lendingInterestRate;
+        borrowingInterestRate = _borrowingInterestRate;
+    }
+
+    // Mint tokens
+    function mint(address _to, uint256 _amount) external onlyOwner {
+        _mint(_to, _amount);
+    }
+
+    // Burn tokens
+    function burn(uint256 _amount) external {
+        _burn(msg.sender, _amount);
+    }
+
+    // Update token price
+    function setTokenPrice(uint256 _newPrice) external onlyOwner {
+        require(_newPrice > 0, "Invalid price");
+        tokenPrice = _newPrice;
+    }
+
+    // Buy tokens
+    function buyTokens() external payable whenNotPaused nonReentrant {
+        require(msg.value > 0, "Invalid amount");
+        uint256 amount = msg.value.mul(1e18).div(tokenPrice);
+        require(amount > 0, "Invalid token amount");
+
+        _transfer(address(this), msg.sender, amount);
+    }
+
+    // Sell tokens
+    function sellTokens(uint256 _amount) external whenNotPaused nonReentrant {
+        require(_amount > 0, "Invalid amount");
+        require(balanceOf(msg.sender) >= _amount, "Insufficient balance");
+
+        uint256 ethAmount = _amount.mul(tokenPrice).div(1e18);
+        _transfer(msg.sender, address(this), _amount);
+
+        (bool success, ) = msg.sender.call{value: ethAmount}("");
+        require(success, "Transfer failed");
+    }
+
+    // Pause contract
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    // Unpause contract
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    // Upgrade the implementation
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    // Internal transfer
+    function _transfer(address sender, address recipient, uint256 amount) internal virtual override {
+        require(sender != address(0), "Invalid sender address");
+        require(recipient != address(0), "Invalid recipient address");
+
+        uint256 feeAmount = amount.mul(transactionFee).div(100);
+        uint256 dividendAmount = amount.mul(dividendFee).div(100);
+        uint256 airdropAmount = amount.mul(airdropFee).div(100);
+        uint256 transferAmount = amount.sub(feeAmount).sub(dividendAmount).sub(airdropAmount);
+
+        super._transfer(sender, recipient, transferAmount);
+
+        // Transfer fee to the contract
+        if (feeAmount > 0) {
+            super._transfer(sender, address(this), feeAmount);
+        }
+
+        // Distribute dividends
+        if (dividendAmount > 0) {
+            // Calculate the total dividends based on the dividend fee
+            uint256 totalDividends = dividendAmount.mul(totalSupply()).div(balanceOf(address(this)));
+
+            // Distribute dividends proportionally to all token holders
+            _distributeDividends(totalDividends);
+        }
+
+        // Distribute airdrops
+        if (airdropAmount > 0) {
+            // Calculate the total airdrops based on the airdrop fee
+            uint256 totalAirdrops = airdropAmount.mul(totalSupply()).div(balanceOf(address(this)));
+
+            // Distribute airdrops to random token holders
+            _distributeAirdrops(totalAirdrops);
+        }
+    }
+
+    // Internal function to distribute dividends to token holders
+    function _distributeDividends(uint256 totalDividends) internal {
+        if (totalDividends > 0) {
+            // Iterate over all token holders and distribute dividends
+            for (uint256 i = 0; i < totalSupply(); i++) {
+                address holder = tokenByIndex(i);
+                uint256 holderBalance = balanceOf(holder);
+                uint256 dividendAmount = totalDividends.mul(holderBalance).div(totalSupply());
+
+                // Transfer dividend amount to the token holder
+                super._transfer(address(this), holder, dividendAmount);
+            }
+        }
+    }
+
+    // Internal function to distribute airdrops to random token holders
+    function _distributeAirdrops(uint256 totalAirdrops) internal {
+        if (totalAirdrops > 0) {
+            // Generate random indices for token holders
+            uint256[] memory indices = _generateRandomIndices(totalAirdrops);
+
+            // Iterate over the random indices and distribute airdrops
+            for (uint256 i = 0; i < indices.length; i++) {
+                address holder = tokenByIndex(indices[i]);
+                uint256 airdropAmount = totalAirdrops.div(indices.length);
+
+                // Transfer airdrop amount to the token holder
+                super._transfer(address(this), holder, airdropAmount);
+            }
+        }
+    }
+
+    // Internal function to generate random indices for airdrop distribution
+    function _generateRandomIndices(uint256 totalIndices) internal view returns (uint256[] memory) {
+        uint256[] memory indices = new uint256[](totalIndices);
+
+        // Generate random indices using a pseudo-random number generator
+        for (uint256 i = 0; i < totalIndices; i++) {
+            indices[i] = uint256(keccak256(abi.encodePacked(block.difficulty, block.timestamp, i))) % totalSupply();
+        }
+
+        return indices;
+    }
+}
+
+contract SafeObolCentralBank is Initializable, ERC20Upgradeable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable, GovernorUpgradeable, GovernorCountingSimpleUpgradeable, GovernorVotesUpgradeable, GovernorVotesQuorumFractionUpgradeable, GovernorVotesCompUpgradeable, GovernorTimelockControlUpgradeable, GovernorSettingsUpgradeable, GovernorPreventLateQuorumUpgradeable, GovernorCompatibilityBravoUpgradeable, GovernorProposalThresholdUpgradeable, TimelockControllerUpgradeable {
+    using SafeMathUpgradeable for uint256;
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
+    // Token details
+    uint256 public constant totalSupply = 6e9 * (10**uint256(decimals())); // 6 billion tokens
+    uint8 public constant decimals = 18;
+    uint256 public tokenPrice;
+
+    // Transaction fees
+    uint256 public transactionFee;
+    uint256 public dividendFee;
+    uint256 public airdropFee;
+
+    // Interest rates
+    uint256 public lendingInterestRate;
+    uint256 public borrowingInterestRate;
+
+    // Event for changing transaction fees
+    event TransactionFeesUpdated(uint256 transactionFee, uint256 dividendFee, uint256 airdropFee);
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() initializer {}
+
+    function initialize() initializer public {
+        __ERC20_init("SafeObol", "SOB");
+        __UUPSUpgradeable_init();
+        __Ownable_init();
+        __ReentrancyGuard_init();
+        __Pausable_init();
+        __Governor_init();
+        __GovernorCountingSimple_init();
+        __GovernorVotes_init();
+        __GovernorVotesQuorumFraction_init();
+        __GovernorVotesComp_init();
+        __GovernorTimelockControl_init();
+        __GovernorSettings_init();
+        __GovernorPreventLateQuorum_init();
+        __GovernorCompatibilityBravo_init();
+        __GovernorProposalThreshold_init();
+        __TimelockController_init();
+
+        transactionFee = 0; // Set default transaction fee to 0
+        dividendFee = 0; // Set default dividend fee to 0
+        airdropFee = 0; // Set default airdrop fee to 0
+
+        lendingInterestRate = 0; // Set default lending interest rate to 0
+        borrowingInterestRate = 0; // Set default borrowing interest rate to 0
+
+        tokenPrice = 1e18; // Set default token price to 1 ETH
+    }
+
+    // Update transaction fees
+    function updateTransactionFees(uint256 _transactionFee, uint256 _dividendFee, uint256 _airdropFee) external onlyOwner {
+        transactionFee = _transactionFee;
+        dividendFee = _dividendFee;
+        airdropFee = _airdropFee;
+        emit TransactionFeesUpdated(_transactionFee, _dividendFee, _airdropFee);
+    }
+
+    // Update interest rates
+    function updateInterestRates(uint256 _lendingInterestRate, uint256 _borrowingInterestRate) external onlyOwner {
+        lendingInterestRate = _lendingInterestRate;
+        borrowingInterestRate = _borrowingInterestRate;
+    }
+
+    // Mint tokens
+    function mint(address _to, uint256 _amount) external onlyOwner {
+        _mint(_to, _amount);
+    }
+
+    // Burn tokens
+    function burn(uint256 _amount) external {
+        _burn(msg.sender, _amount);
+    }
+
+    // Update token price
+    function setTokenPrice(uint256 _newPrice) external onlyOwner {
+        require(_newPrice > 0, "Invalid price");
+        tokenPrice = _newPrice;
+    }
+
+    // Buy tokens
+    function buyTokens() external payable whenNotPaused nonReentrant {
+        require(msg.value > 0, "Invalid amount");
+        uint256 amount = msg.value.mul(1e18).div(tokenPrice);
+        require(amount > 0, "Invalid token amount");
+
+        _transfer(address(this), msg.sender, amount);
+    }
+
+    // Sell tokens
+    function sellTokens(uint256 _amount) external whenNotPaused nonReentrant {
+        require(_amount > 0, "Invalid amount");
+        require(balanceOf(msg.sender) >= _amount, "Insufficient balance");
+
+        uint256 ethAmount = _amount.mul(tokenPrice).div(1e18);
+        _transfer(msg.sender, address(this), _amount);
+
+        (bool success, ) = msg.sender.call{value: ethAmount}("");
+        require(success, "Transfer failed");
+    }
+
+    // Pause contract
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    // Unpause contract
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    // Upgrade the implementation
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    // Internal transfer
+    function _transfer(address sender, address recipient, uint256 amount) internal virtual override {
+        require(sender != address(0), "Invalid sender address");
+        require(recipient != address(0), "Invalid recipient address");
+
+        uint256 feeAmount = amount.mul(transactionFee).div(100);
+        uint256 dividendAmount = amount.mul(dividendFee).div(100);
+        uint256 airdropAmount = amount.mul(airdropFee).div(100);
+        uint256 transferAmount = amount.sub(feeAmount).sub(dividendAmount).sub(airdropAmount);
+
+        super._transfer(sender, recipient, transferAmount);
+
+        // Transfer fee to the contract
+        if (feeAmount > 0) {
+            super._transfer(sender, address(this), feeAmount);
+        }
+
+        // Distribute dividends
+        if (dividendAmount > 0) {
+            // Calculate the total dividends based on the dividend fee
+            uint256 totalDividends = dividendAmount.mul(totalSupply()).div(balanceOf(address(this)));
+
+            // Distribute dividends proportionally to all token holders
+            _distributeDividends(totalDividends);
+        }
+
+        // Distribute airdrops
+        if (airdropAmount > 0) {
+            // Calculate the total airdrops based on the airdrop fee
+            uint256 totalAirdrops = airdropAmount.mul(totalSupply()).div(balanceOf(address(this)));
+
+            // Distribute airdrops to random token holders
+            _distributeAirdrops(totalAirdrops);
+        }
+    }
+
+    // Internal function to distribute dividends to token holders
+    function _distributeDividends(uint256 totalDividends) internal {
+        if (totalDividends > 0) {
+            // Iterate over all token holders and distribute dividends
+            for (uint256 i = 0; i < totalSupply(); i++) {
+                address holder = tokenByIndex(i);
+                uint256 holderBalance = balanceOf(holder);
+                uint256 dividendAmount = totalDividends.mul(holderBalance).div(totalSupply());
+
+                // Transfer dividend amount to the token holder
+                super._transfer(address(this), holder, dividendAmount);
+            }
+        }
+    }
+
+    // Internal function to distribute airdrops to random token holders
+    function _distributeAirdrops(uint256 totalAirdrops) internal {
+        if (totalAirdrops > 0) {
+            // Generate random indices for token holders
+            uint256[] memory indices = _generateRandomIndices(totalAirdrops);
+
+            // Iterate over the random indices and distribute airdrops
+            for (uint256 i = 0; i < indices.length; i++) {
+                address holder = tokenByIndex(indices[i]);
+                uint256 airdropAmount = totalAirdrops.div(indices.length);
+
+                // Transfer airdrop amount to the token holder
+                super._transfer(address(this), holder, airdropAmount);
+            }
+        }
+    }
+
+    // Internal function to generate random indices for airdrop distribution
+    function _generateRandomIndices(uint256 totalIndices) internal view returns (uint256[] memory) {
+        uint256[] memory indices = new uint256[](totalIndices);
+
+        // Generate random indices using a pseudo-random number generator
+        for (uint256 i = 0; i < totalIndices; i++) {
+            indices[i] = uint256(keccak256(abi.encodePacked(block.difficulty, block.timestamp, i))) % totalSupply();
+        }
+
+        return indices;
+    }
+}
