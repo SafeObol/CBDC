@@ -1,0 +1,17 @@
+pragma solidity ^0.8.4;
+
+import "./SafeObolCommercialBankLayer.sol";
+import "./SafeObolRetailBankLayer.sol";
+
+contract SafeObolIntermediaryBank {
+    SafeObolCommercialBankLayer public commercialBank;
+    SafeObolRetailBankLayer public retailBank;
+
+    constructor(address _commercialBank, address _retailBank) {
+        commercialBank = SafeObolCommercialBankLayer(_commercialBank);
+        retailBank = SafeObolRetailBankLayer(_retailBank);
+    }
+
+    // Intermediary bank functions
+    // Implement the functions specific to the intermediary bank here
+}
