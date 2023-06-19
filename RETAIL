@@ -1,0 +1,16 @@
+pragma solidity ^0.8.4;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+
+contract SafeObolRetailBankLayer is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+    function initialize() initializer public {
+        __ERC20_init("SafeObol Retail Bank Layer", "SORBL");
+        __Ownable_init();
+        __ReentrancyGuard_init();
+    }
+
+    // Retail bank layer functions
+    // Implement the functions specific to the retail bank layer here
+}
